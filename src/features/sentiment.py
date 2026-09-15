@@ -1,11 +1,34 @@
-"""Real-time sentiment and context feature extractor."""
+"""Real-time sentiment and context feature extractor.
+
+POINT-IN-TIME WARNING
+---------------------
+This engine queries a live news search at the moment `get_team_sentiment` is
+called. That is correct for live trading and **invalid for backtesting**: a
+backtest replaying March 2026 markets would score them against whatever the
+web says today, which is a look-ahead leak and also makes the backtest
+non-reproducible and network-dependent.
+
+`FeatureEngine` therefore defaults to `allow_live_sentiment=False` and returns
+0.0 for these features during research. Enable it only in the live runner, or
+supply a historical sentiment table keyed by (team, timestamp).
+
+Both third-party dependencies are optional; the module degrades to neutral
+sentiment when they are absent so that the research pipeline never depends on
+a scraping package being installed.
+"""
 
 import logging
 from typing import Dict
 import time
 
-from duckduckgo_search import DDGS
-from textblob import TextBlob
+try:
+    from duckduckgo_search import DDGS
+except ImportError:  # optional dependency
+    DDGS = None
+try:
+    from textblob import TextBlob
+except ImportError:  # optional dependency
+    TextBlob = None
 
 logger = logging.getLogger("trading.features.sentiment")
 
@@ -15,6 +38,13 @@ class SentimentEngine:
     def __init__(self):
         self.cache: Dict[str, Dict[str, float]] = {}
         self.cache_ttl = 3600 * 4  # 4 hours
+        if DDGS is None or TextBlob is None:
+            logger.info(
+                "duckduckgo-search / textblob not installed -- sentiment "
+                "features will be neutral (0.0)."
+            )
+            self.ddgs = None
+            return
         try:
             self.ddgs = DDGS()
         except BaseException as e:

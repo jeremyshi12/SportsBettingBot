@@ -171,17 +171,17 @@ class ModelTrainer:
         else:
             test_acc = 0.0
 
-        # EV estimation
-        ev_estimates = []
-        for _, row in test_df.iterrows():
-            fv_dict = {k: row[k] for k in feature_cols if k in row.index}
-            if row["regime"] == "non_cross":
-                ev = row.get("did_rebound", 0) * row.get("max_rebound_multiplier", 1) - 1
-            else:
-                ev = row.get("did_rebound", 0) * row.get("max_rebound_multiplier", 1) - 1
-            ev_estimates.append(ev)
-
-        avg_ev = float(sum(ev_estimates) / len(ev_estimates)) if ev_estimates else 0.0
+        # Realised expected return per dollar staked, gross of fees.
+        # (This previously used `max_rebound_multiplier` -- the path maximum --
+        # and branched identically on both sides of an if/else.)
+        if "realised_multiple" in test_df.columns:
+            avg_ev = float((test_df["realised_multiple"] - 1.0).mean())
+        else:
+            logger.warning(
+                "Test frame has no 'realised_multiple' column; it was built by "
+                "the pre-fix labeller. Rebuild it with DatasetBuilder."
+            )
+            avg_ev = float("nan")
 
         logger.info(f"Test set: regime_accuracy={test_acc:.3f}, avg_EV={avg_ev:.3f}")
         return {"regime_accuracy": test_acc, "avg_ev": avg_ev}

@@ -11,6 +11,7 @@ Routes each game observation through:
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from typing import Optional
 
 from src.data.models import (
@@ -40,6 +41,7 @@ class RegimeRouter:
         regime_classifier: RegimeClassifier | None = None,
         nc_optimizer: NonCrossParamOptimizer | None = None,
         cr_optimizer: CrossParamOptimizer | None = None,
+        feature_engine: FeatureEngine | None = None,
     ):
         self.config = config or load_config()
 
@@ -48,8 +50,8 @@ class RegimeRouter:
         self.nc_optimizer = nc_optimizer or NonCrossParamOptimizer()
         self.cr_optimizer = cr_optimizer or CrossParamOptimizer()
 
-        # Feature engine
-        self.feature_engine = FeatureEngine()
+        # Feature engine (shareable, so a sweep computes features once)
+        self.feature_engine = feature_engine or FeatureEngine()
 
         # Market regime detector
         mr_cfg = self.config.get("market_regime", {})
@@ -60,6 +62,10 @@ class RegimeRouter:
             use_hmm=mr_cfg.get("use_hmm", True),
         )
         self._market_regime_enabled = mr_cfg.get("enabled", True)
+
+        # Minimum net expected return per dollar staked required to trade.
+        # Set above 0 to demand a margin over the fee-adjusted breakeven.
+        self.min_ev = float(self.config.get("trading", {}).get("min_expected_return", 0.0))
 
         # Strategies
         self.non_cross_strategy = NonCrossStrategy()
@@ -104,10 +110,14 @@ class RegimeRouter:
             ]
             vol_regime = self.market_regime_detector.detect(strong_probs)
 
-        # Step 2: Classify regime (Cross vs Non-Cross)
+        # Step 2: Route. `regime` comes from a deterministic rule; the model
+        # contributes a calibrated probability, not the routing decision.
         regime_result = self.regime_clf.predict(features)
         regime = regime_result["regime"]
         confidence = regime_result["confidence"]
+        if not regime_result.get("is_candidate", True):
+            # Not a collapse candidate at all -- nothing to evaluate.
+            return None
 
         logger.debug(
             f"[{game.game_id}] regime={regime} (conf={confidence:.2f}) | "
@@ -118,9 +128,21 @@ class RegimeRouter:
 
         # Step 3 & 4: Route to strategy
         if regime == "non_cross":
-            return self._evaluate_non_cross(game, features, vol_regime)
+            signal = self._evaluate_non_cross(game, features, vol_regime)
         else:
-            return self._evaluate_cross(game, features, vol_regime)
+            signal = self._evaluate_cross(game, features, vol_regime)
+
+        # Overwrite the strategy's heuristic confidence with the model's
+        # calibrated probability when one exists. The heuristic
+        # (min(OP/10, 1)) is a price ratio, and Kelly sizing on a price ratio
+        # is sizing on a number that is not a probability.
+        if signal is not None and regime_result.get("cross_prob") is not None:
+            signal = replace(
+                signal,
+                confidence=float(regime_result["cross_prob"]),
+                calibrated_confidence=float(regime_result["cross_prob"]),
+            )
+        return signal
 
     def _evaluate_non_cross(
         self, game: GameState, features: FeatureVector,
@@ -128,11 +150,18 @@ class RegimeRouter:
     ) -> TradeSignal | None:
         """Evaluate Non-Cross strategy with ML parameters."""
         # Get optimized params
+        entry_prob = (
+            features.prob_b_current if features.is_team_a_favorite
+            else features.prob_a_current
+        )
         if self.nc_optimizer.rebound_model is not None:
             params = self.nc_optimizer.predict_params(features)
-            ev = self.nc_optimizer.predict_ev(features)
-            if ev < 0:
-                logger.debug(f"[{game.game_id}] Non-Cross EV={ev:.3f} < 0, skipping")
+            # EV is now net of the Kalshi fee schedule at the actual entry
+            # price, so a trade whose edge is smaller than its round trip is
+            # rejected here rather than booked as a winner.
+            ev = self.nc_optimizer.predict_ev(features, entry_price=entry_prob)
+            if ev < self.min_ev:
+                logger.debug(f"[{game.game_id}] Non-Cross EV={ev:+.4f} below floor, skipping")
                 return None
         else:
             params = self.default_nc_params
@@ -148,6 +177,7 @@ class RegimeRouter:
             signal = TradeSignal(
                 game_id=signal.game_id,
                 regime=signal.regime,
+                side=signal.side,
                 entry_prob=signal.entry_prob,
                 target_exit_prob=signal.target_exit_prob,
                 exit_multiplier=signal.exit_multiplier,
@@ -164,11 +194,15 @@ class RegimeRouter:
         vol_regime=None,
     ) -> TradeSignal | None:
         """Evaluate Cross strategy with ML parameters."""
+        entry_prob = (
+            features.prob_a_current if features.is_team_a_favorite
+            else features.prob_b_current
+        )
         if self.cr_optimizer.rebound_model is not None:
             params = self.cr_optimizer.predict_params(features)
-            ev = self.cr_optimizer.predict_ev(features)
-            if ev < 0:
-                logger.debug(f"[{game.game_id}] Cross EV={ev:.3f} < 0, skipping")
+            ev = self.cr_optimizer.predict_ev(features, entry_price=entry_prob)
+            if ev < self.min_ev:
+                logger.debug(f"[{game.game_id}] Cross EV={ev:+.4f} below floor, skipping")
                 return None
         else:
             params = self.default_cr_params
@@ -184,6 +218,7 @@ class RegimeRouter:
             signal = TradeSignal(
                 game_id=signal.game_id,
                 regime=signal.regime,
+                side=signal.side,
                 entry_prob=signal.entry_prob,
                 target_exit_prob=signal.target_exit_prob,
                 exit_multiplier=signal.exit_multiplier,

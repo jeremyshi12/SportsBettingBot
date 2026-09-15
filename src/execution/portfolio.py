@@ -24,13 +24,30 @@ logger = logging.getLogger("trading.execution.portfolio")
 
 
 class KellyCriterionSizer:
-    """Fractional Kelly Criterion position sizer.
+    """Fractional Kelly position sizer for a partial-loss payoff.
 
-    Full Kelly: f* = (p * (b + 1) - 1) / b
-      where p = probability of winning, b = net odds (payout ratio)
+    The original used the all-or-nothing form
 
-    We apply a conservative fraction (default 0.25) of full Kelly to
-    reduce variance while maintaining positive edge growth.
+        f* = (p * (b + 1) - 1) / b
+
+    which assumes a loss costs the entire stake. This strategy exits at a stop
+    of 0.5x entry, so a loss costs roughly half the stake, and the correct
+    form is the general one:
+
+        f* = (p * b - (1 - p) * a) / (a * b)
+
+    with b = fractional gain on a win (m - 1) and a = fractional loss on a
+    loss (1 - stop_multiple). Using the all-or-nothing formula on a
+    partial-loss payoff *understates* the optimal fraction, so it was
+    conservative in the right direction -- but it was being fed the wrong `p`,
+    which was not.
+
+    `p` MUST be a calibrated probability. The strategies previously passed
+    `confidence = min(op_value / 10, 1.0)`, a scaled price ratio that can sit
+    at 1.0 while the true win probability is 15%. Kelly on that number sizes
+    straight into ruin. `require_calibrated_p` makes the contract explicit:
+    when the caller cannot supply a real probability, fall back to flat
+    sizing rather than pretending.
     """
 
     def __init__(
@@ -39,11 +56,15 @@ class KellyCriterionSizer:
         max_bet_fraction: float = 0.05,
         min_bet_usd: float = 0.50,
         bankroll_floor_fraction: float = 0.10,
+        loss_fraction: float = 0.50,
+        require_calibrated_p: bool = True,
     ):
         self.kelly_fraction = kelly_fraction  # fraction of full Kelly
         self.max_bet_fraction = max_bet_fraction  # max fraction of bankroll per bet
         self.min_bet_usd = min_bet_usd
         self.bankroll_floor_fraction = bankroll_floor_fraction  # reserve ratio
+        self.loss_fraction = loss_fraction   # fraction of stake lost at the stop
+        self.require_calibrated_p = require_calibrated_p
 
     def compute_stake(
         self,
@@ -62,22 +83,32 @@ class KellyCriterionSizer:
         Returns:
             Optimal stake in USD.
         """
-        # Edge estimation:
-        # p = model confidence (probability of a favorable outcome)
-        # b = expected payout ratio (exit_multiplier - 1 for net odds)
-        p = float(np.clip(signal.confidence, 0.01, 0.99))
-        b = max(signal.exit_multiplier - 1.0, 0.01)  # net odds
+        # p must be a calibrated win probability. `calibrated_confidence` is
+        # set by the router from the classifier's predict_proba; when it is
+        # absent, `confidence` is the strategy heuristic and Kelly does not
+        # apply.
+        p_raw = getattr(signal, "calibrated_confidence", None)
+        if p_raw is None and not self.require_calibrated_p:
+            p_raw = signal.confidence
+        if p_raw is None:
+            logger.debug("No calibrated probability available -- flat sizing.")
+            return min(round(self.min_bet_usd, 2), max_stake)
 
-        # Full Kelly fraction: f* = (p*(b+1) - 1) / b
-        full_kelly = (p * (b + 1.0) - 1.0) / b
+        p = float(np.clip(p_raw, 0.001, 0.999))
+        b = max(signal.exit_multiplier - 1.0, 0.01)   # fractional gain on a win
+        a = float(np.clip(self.loss_fraction, 0.01, 1.0))  # fractional loss on a loss
 
-        # If Kelly is negative, the edge is negative — don't bet
+        # General Kelly for a partial-loss payoff.
+        full_kelly = (p * b - (1.0 - p) * a) / (a * b)
+
+        # Negative Kelly means negative edge. Do not trade -- the original
+        # returned half the minimum stake here, which bets anyway.
         if full_kelly <= 0:
             logger.debug(
-                f"Kelly negative ({full_kelly:.4f}), no edge | "
-                f"p={p:.3f}, b={b:.2f}"
+                f"Kelly {full_kelly:+.4f} <= 0: negative edge, no trade | "
+                f"p={p:.3f}, b={b:.2f}, a={a:.2f}"
             )
-            return self.min_bet_usd * 0.5  # minimum table stake
+            return 0.0
 
         # Apply fraction of Kelly
         fractional_kelly = full_kelly * self.kelly_fraction
@@ -91,7 +122,8 @@ class KellyCriterionSizer:
         max_from_bankroll = available_bankroll * self.max_bet_fraction
         stake = min(fractional_kelly * available_bankroll, max_from_bankroll)
 
-        # Apply hard limits
+        # Apply hard limits. The floor only applies once Kelly has already
+        # said the edge is positive.
         stake = max(stake, self.min_bet_usd)
         stake = min(stake, max_stake)
 

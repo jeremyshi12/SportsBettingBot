@@ -14,6 +14,7 @@ from src.data.models import (
     ExitStrategy,
     GameState,
     Regime,
+    Side,
     TradeSignal,
 )
 from src.features.engine import FeatureVector
@@ -38,7 +39,10 @@ class CrossStrategy:
         3. S value exceeds threshold
         4. Sufficient time remaining
         """
-        # Identify strong team
+        # Identify the strong side. As in the Non-Cross model, the side
+        # travels with the signal so that the exit is priced on the side that
+        # was actually bought.
+        side = Side.YES if features.is_team_a_favorite else Side.NO
         if features.is_team_a_favorite:
             p0_strong = features.prob_a_initial
             pt_strong = features.prob_a_current
@@ -75,6 +79,7 @@ class CrossStrategy:
         return TradeSignal(
             game_id=game.game_id,
             regime=Regime.CROSS,
+            side=side,
             entry_prob=pt_strong,
             target_exit_prob=min(target_exit, 0.99),
             exit_multiplier=params.exit_multiplier,

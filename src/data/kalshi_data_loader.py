@@ -253,45 +253,56 @@ class KalshiDataLoader:
         return df
 
     def _compute_rebound_labels(self, df: pd.DataFrame) -> pd.DataFrame:
-        """For each entry candidate, look ahead to see if a rebound occurred."""
+        """Label each candidate entry with a triple-barrier outcome.
+
+        This previously computed a *reverse running maximum* of the remaining
+        path:
+
+            running_max = max(running_max, probs[i])       # scanning backwards
+            max_rebound_multiplier = future_max / implied_prob
+            did_rebound = max_rebound_multiplier >= 2.0
+
+        which is the same look-ahead defect as the one in `ml/dataset.py`: the
+        target is the best price the market ever reached afterwards, which is
+        only knowable in hindsight and is not attainable by an order. It also
+        ignored the stop, so a path that collapsed through it and later spiked
+        counted as a win.
+
+        Labels now come from `src/ml/labeling.py` -- the same code path as the
+        rest of the pipeline, so there is one definition of a win rather than
+        three.
+        """
+        from src.ml.labeling import Barriers, apply_triple_barrier
+
         df = df.sort_values(["ticker", "end_period_ts"]).reset_index(drop=True)
+        barriers = Barriers(
+            target_multiple=2.0, stop_multiple=0.5, max_horizon=24
+        )
 
-        # Pre-compute future max prob per ticker using forward rolling max
-        result_rows = []
-        for ticker, group in df.groupby("ticker"):
+        out = []
+        for _, group in df.groupby("ticker"):
             group = group.sort_values("end_period_ts").reset_index(drop=True)
-            probs = group["implied_prob"].values
-            n = len(probs)
+            probs = group["implied_prob"].values.astype(float)
 
-            # For each row, compute the max probability seen in the future
-            future_max = np.full(n, np.nan)
-            future_min = np.full(n, np.nan)
-            running_max = probs[-1]
-            running_min = probs[-1]
-            for i in range(n - 1, -1, -1):
-                running_max = max(running_max, probs[i])
-                running_min = min(running_min, probs[i])
-                future_max[i] = running_max
-                future_min[i] = running_min
+            touched, mult, exit_px, held, ambiguous = [], [], [], [], []
+            for i in range(len(probs)):
+                o = apply_triple_barrier(probs, i, barriers)
+                touched.append(o.touched)
+                mult.append(o.realised_multiple)
+                exit_px.append(o.exit_price)
+                held.append(o.bars_held)
+                ambiguous.append(o.ambiguous)
 
             group = group.copy()
-            group["future_max_prob"] = future_max
-            group["future_min_prob"] = future_min
+            group["barrier"] = touched
+            group["realised_multiple"] = mult
+            group["did_rebound"] = [t == "upper" for t in touched]
+            group["exit_price_realised"] = exit_px
+            group["bars_held"] = held
+            group["ambiguous"] = ambiguous
+            out.append(group)
 
-            # Rebound multiplier: how much did it bounce back?
-            group["max_rebound_multiplier"] = (
-                group["future_max_prob"] / group["implied_prob"].clip(lower=0.001)
-            )
-
-            # Did it rebound by at least 2x?
-            group["did_rebound"] = group["max_rebound_multiplier"] >= 2.0
-
-            # Exit prob at max rebound
-            group["exit_prob_at_max"] = group["future_max_prob"]
-
-            result_rows.append(group)
-
-        return pd.concat(result_rows, ignore_index=True)
+        return pd.concat(out, ignore_index=True)
 
     @staticmethod
     def _parse_teams(title: str, ticker: str) -> tuple[str, str]:

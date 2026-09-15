@@ -13,6 +13,7 @@ from src.data.models import (
     GameState,
     NonCrossParams,
     Regime,
+    Side,
     TradeSignal,
 )
 from src.features.engine import FeatureVector
@@ -37,11 +38,16 @@ class NonCrossStrategy:
         3. Sufficient time remaining
         4. Expected exit remains below 50%
         """
-        # Identify weak team's current probability
-        if features.is_team_a_favorite:
-            pt_weak = features.prob_b_current
-        else:
-            pt_weak = features.prob_a_current
+        # Identify the weak side and its current probability. The side is
+        # carried on the signal from here on: every downstream price lookup
+        # (exit, stop, mark-to-market) must use the *same* side, which is
+        # exactly what the original engine failed to do.
+        side = Side.NO if features.is_team_a_favorite else Side.YES
+        pt_weak = (
+            features.prob_b_current
+            if features.is_team_a_favorite
+            else features.prob_a_current
+        )
 
         # Condition 1: Prob in entry range
         if not (params.entry_prob_low <= pt_weak <= params.entry_prob_high):
@@ -70,6 +76,7 @@ class NonCrossStrategy:
         return TradeSignal(
             game_id=game.game_id,
             regime=Regime.NON_CROSS,
+            side=side,
             entry_prob=pt_weak,
             target_exit_prob=target_exit,
             exit_multiplier=params.exit_multiplier,

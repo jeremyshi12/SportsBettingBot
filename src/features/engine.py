@@ -160,7 +160,18 @@ class FeatureVector:
 
 
 class FeatureEngine:
-    """Computes features from GameState objects."""
+    """Computes features from GameState objects.
+
+    Args:
+        allow_live_sentiment: When True, the sentiment features are populated
+            from a live news search. This is only valid in live trading --
+            during a backtest it leaks information from after the market date.
+            Defaults to False so that research runs are point-in-time clean
+            and reproducible offline.
+    """
+
+    def __init__(self, allow_live_sentiment: bool = False):
+        self.allow_live_sentiment = allow_live_sentiment
 
     def compute(
         self,
@@ -250,8 +261,15 @@ class FeatureEngine:
         fv.strength_ratio = snap0.prob_a / max(snap0.prob_b, 1e-6)
 
         # ── Sentiment ─────────────────────────────────────────────────
-        fv.team_a_sentiment = sentiment_engine.get_team_sentiment(game.team_a)
-        fv.team_b_sentiment = sentiment_engine.get_team_sentiment(game.team_b)
+        # Sentiment is a LIVE web lookup. Computing it while replaying
+        # historical data scores a March market against today's news, which is
+        # look-ahead. Off by default; the live runner opts in explicitly.
+        if self.allow_live_sentiment:
+            fv.team_a_sentiment = sentiment_engine.get_team_sentiment(game.team_a)
+            fv.team_b_sentiment = sentiment_engine.get_team_sentiment(game.team_b)
+        else:
+            fv.team_a_sentiment = 0.0
+            fv.team_b_sentiment = 0.0
 
         # ── NEW: Technical Indicators ─────────────────────────────────
         # We compute these on the "strong team" probs for Cross regime
@@ -573,21 +591,28 @@ class FeatureEngine:
         series: list[float], window: int = 20, sub_window: int = 5
     ) -> float:
         """Volatility of volatility: how unstable is the volatility itself.
-        
+
         High vol-of-vol signals regime instability — the game's dynamics
         are shifting unpredictably. Useful for adjusting position sizes.
+
+        Vectorised over the tail only. The previous implementation walked the
+        *entire* series computing one np.std per position, then discarded all
+        but the last `window` of them — O(n) numpy calls per feature vector,
+        growing with game length, for an O(window) result. It was 55% of
+        backtest runtime.
         """
-        if len(series) < window:
+        n = len(series)
+        if n < window or sub_window < 2:
             return 0.0
-        # Compute rolling sub-window volatilities
-        sub_vols = []
-        for i in range(sub_window, len(series) + 1):
-            chunk = series[i - sub_window: i]
-            diffs = [chunk[j] - chunk[j - 1] for j in range(1, len(chunk))]
-            if diffs:
-                sub_vols.append(float(np.std(diffs)))
-        if len(sub_vols) < 3:
+
+        arr = np.asarray(series, dtype=float)
+        diffs = np.diff(arr)                      # len n-1
+        k = sub_window - 1                        # diffs per sub-window
+        n_sub = len(diffs) - k + 1                # available sub-windows
+        if n_sub < 3:
             return 0.0
-        # Vol-of-vol = std of the rolling volatilities
-        recent_vols = sub_vols[-min(window, len(sub_vols)):]
-        return float(np.std(recent_vols))
+
+        take = min(window, n_sub)
+        tail = diffs[-(take + k - 1):]            # only what the answer needs
+        blocks = np.lib.stride_tricks.sliding_window_view(tail, k)
+        return float(np.std(blocks.std(axis=1)))
