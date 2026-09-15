@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Node
+node_modules/
+frontend/.next/
+frontend/build/
+.cache/
+
+# OS
+.DS_Store
+
+# Generated data artefacts (rebuild with scripts/build_dataset.py)
+data/panel.csv
+data/panel_quality.json
+data/trading.db
+data/trading.log
+data/backtest_report*.csv
+data/backtest_report*.html
+data/test_output.txt
+
+# Generated research output (rebuild with scripts/run_research.py)
+reports/*.csv
+reports/*.json
+reports/*.log
+!reports/legacy/**
+
+# Trained models (retrain with scripts/train_models.py)
+src/ml/models/*.joblib
