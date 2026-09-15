@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import enum
 import logging
+from collections import deque
 from dataclasses import dataclass
 
 import numpy as np
@@ -62,11 +63,18 @@ class MarketRegimeDetector:
         high_vol_pctile: float = 0.70,
         vol_window: int = 20,
         use_hmm: bool = True,
+        history_window: int = 500,
     ):
         self.low_vol_pctile = low_vol_pctile
         self.high_vol_pctile = high_vol_pctile
         self.vol_window = vol_window
         self.use_hmm = use_hmm and HAS_HMM
+        # The reference distribution for "is current vol high?" is a rolling
+        # window, not all history ever seen. Unbounded history made the
+        # percentile depend on how many markets had already been processed,
+        # so the same bar scored differently depending on iteration order --
+        # and made the lookup O(n log n) on an ever-growing list.
+        self.history_window = history_window
 
         # HMM model (trained lazily)
         self._hmm_model: GaussianHMM | None = None
@@ -75,7 +83,9 @@ class MarketRegimeDetector:
         # Regime tracking
         self._current_regime = VolatilityRegime.MEDIUM
         self._regime_duration = 0
-        self._vol_history: list[float] = []
+        self._vol_history: deque[float] = deque(maxlen=history_window)
+        self._sorted_dirty = True
+        self._sorted_vols: np.ndarray = np.empty(0)
 
     def detect(self, prob_series: list[float]) -> RegimeState:
         """Detect current volatility regime from probability series.
@@ -100,6 +110,7 @@ class MarketRegimeDetector:
         # Compute current realized volatility
         current_vol = self._compute_rolling_vol(prob_series, self.vol_window)
         self._vol_history.append(current_vol)
+        self._sorted_dirty = True
 
         # Detect regime
         if self.use_hmm and len(self._vol_history) >= 30:
@@ -169,7 +180,7 @@ class MarketRegimeDetector:
         if not HAS_HMM:
             return self._detect_percentile(self._vol_history[-1])
 
-        vols = np.array(self._vol_history).reshape(-1, 1)
+        vols = np.fromiter(self._vol_history, dtype=float).reshape(-1, 1)
 
         # Fit or refit HMM periodically
         if not self._hmm_fitted or len(self._vol_history) % 50 == 0:
@@ -213,12 +224,19 @@ class MarketRegimeDetector:
             return self._detect_percentile(self._vol_history[-1])
 
     def _compute_vol_percentile(self, current_vol: float) -> float:
-        """Where does current vol sit in historical distribution?"""
+        """Where does current vol sit in the rolling historical distribution?
+
+        Binary search over a cached sort instead of a full sort plus a Python
+        scan per call. The previous version ran 51M generator iterations in a
+        single 520-market backtest.
+        """
         if len(self._vol_history) < 5:
             return 0.5
-        sorted_vols = sorted(self._vol_history)
-        rank = sum(1 for v in sorted_vols if v <= current_vol)
-        return rank / len(sorted_vols)
+        if self._sorted_dirty:
+            self._sorted_vols = np.sort(np.fromiter(self._vol_history, dtype=float))
+            self._sorted_dirty = False
+        rank = int(np.searchsorted(self._sorted_vols, current_vol, side="right"))
+        return rank / len(self._sorted_vols)
 
     @staticmethod
     def _get_recommendations(
@@ -241,8 +259,16 @@ class MarketRegimeDetector:
             return 1.0, 1.0
 
     def reset(self):
-        """Reset detector state for a new session."""
-        self._vol_history = []
+        """Reset detector state for a new session.
+
+        Call between independent universes so one run's volatility history
+        cannot colour another's. (This previously rebound `_vol_history` to a
+        plain list, silently discarding the bounded deque and restoring the
+        unbounded-growth behaviour on the next run.)
+        """
+        self._vol_history.clear()
+        self._sorted_dirty = True
+        self._sorted_vols = np.empty(0)
         self._current_regime = VolatilityRegime.MEDIUM
         self._regime_duration = 0
         self._hmm_fitted = False

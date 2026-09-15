@@ -28,11 +28,15 @@ trading:
   max_concurrent_positions: 10
   daily_loss_limit_usd: 50.00
   max_loss_per_trade_usd: 10.00
+  # Minimum expected net return per dollar staked, after fees, to trade.
+  min_expected_return: 0.0
 
 # Kelly Criterion position sizing
 kelly:
   enabled: true
   fraction: 0.25             # fraction of full Kelly (conservative)
+  loss_fraction: 0.50        # fraction of stake lost at the stop (partial-loss Kelly)
+  require_calibrated_p: true # refuse to size on a non-probability
   max_bet_fraction: 0.05     # max 5% of bankroll per bet
   min_bet_usd: 0.50
   bankroll_floor_fraction: 0.10  # always keep 10% in reserve
@@ -69,9 +73,28 @@ ml:
   cross_model: "cross_params.joblib"
   # Training
   train_test_split: [0.70, 0.15, 0.15]
-  synthetic_samples: 10000
+  chronological_split: true   # never shuffle time series into train/test
   # Ensemble (set to false to use single XGBoost)
   use_ensemble: true
+
+  # Purged, embargoed walk-forward. Triple-barrier labels span multiple bars,
+  # so overlapping label windows must be purged out of the training fold.
+  cv:
+    n_splits: 5
+    embargo_frac: 0.01
+    min_train_size: 50
+
+  # SYNTHETIC DATA IS FOR PIPELINE TESTS ONLY. The generator plants the exact
+  # pattern the strategy looks for, so any performance figure from it measures
+  # the generator. reports/legacy/ has the result this produced.
+  synthetic_samples: 10000
+
+# Labelling (see src/ml/labeling.py)
+labels:
+  target_multiple: 2.0        # profit barrier, as a multiple of entry
+  stop_multiple: 0.5          # stop barrier
+  max_horizon_bars: 24        # time barrier
+  intrabar_policy: "conservative"   # "conservative" | "optimistic" | "close_only"
 
 # Market regime detection
 market_regime:
@@ -84,9 +107,22 @@ market_regime:
 # Backtesting
 backtest:
   initial_bankroll: 100.0
-  transaction_cost_pct: 0.01  # 1% per trade (Kalshi typical)
   monte_carlo_sims: 1000
   walk_forward_folds: 5
+
+  # Execution assumptions. `transaction_cost_pct: 0.01` was removed: it
+  # charged 1% of realised P&L once per round trip, whereas Kalshi charges
+  # ceil(0.07 * contracts * price * (1 - price)) on notional, per order, on
+  # both legs. See src/backtest/costs.py.
+  slippage_ticks: 0.0        # extra cents paid beyond the touch
+  max_participation: 0.10    # cap size at this fraction of the bar's volume
+  max_relative_spread: 1.0   # reject quotes wider than 100% of mid
+
+# Kalshi fee schedule
+fees:
+  taker_rate: 0.07           # 0.035 on a small set of financial series
+  maker_rate: 0.0            # 0.0025 on the series that charge it
+  round_up_to_cent: true     # per order -- punitive on 1-5c contracts
 
 storage:
   db_path: "data/trading.db"
@@ -96,3 +132,17 @@ logging:
   log_file: "data/trading.log"
   max_bytes: 10485760   # 10 MB
   backup_count: 5
+
+# Data quality gates applied when building the research panel.
+# Every gate is enforced and counted; nothing is silently filled.
+panel:
+  require_two_sided_quote: true   # a one-sided quote cannot be filled
+  max_spread: 0.10                # drop bars quoted wider than 10c
+  require_settlement: true        # need a realised outcome to score against
+  min_bars_per_market: 8
+  # kinds: [game_winner]          # uncomment to restrict the universe
+
+# Live trading only. Sentiment is a live web lookup; computing it while
+# replaying history scores past markets against today's news.
+features:
+  allow_live_sentiment: false

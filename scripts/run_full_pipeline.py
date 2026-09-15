@@ -15,6 +15,37 @@ Usage:
     python scripts/run_full_pipeline.py --min-candles 10 --no-train
 """
 
+
+# ---------------------------------------------------------------------------
+# DEPRECATED. This script produced kalshi_data/pipeline_results.json
+# (206 trades, $1,994 P&L, profit factor 27.6, regime accuracy 1.000), now in
+# reports/legacy/ with a full explanation of why none of it was real.
+#
+# It carries its own inline copy of the labelling logic, which still computes
+# `max_rebound_multiplier` -- the running maximum of the remaining price path.
+# That target is not attainable by an order and ignores the stop-loss. The
+# corrected implementation lives in src/ml/labeling.py and is used everywhere
+# else in the repository.
+#
+# It is kept, unmodified below this banner, so the original result stays
+# reproducible for the audit. It refuses to run without --reproduce-legacy.
+#
+# Use instead:
+#     python scripts/build_dataset.py      # build the panel from raw data
+#     python scripts/run_research.py --sweep
+#
+# NOTE: `--synthetic` is a PIPELINE SMOKE TEST, not an evaluation.
+#
+# SyntheticDataGenerator plants the exact pattern this strategy looks for
+# (a collapse followed by a rebound), so any performance number it produces
+# measures the generator. kalshi_data/pipeline_results.json -- 206 trades,
+# $1,994 P&L, profit factor 27.6 -- came from here, two days before any market
+# data was scraped. It now lives in reports/legacy/ with an explanation.
+#
+# For results on real data use:
+#     python scripts/run_research.py --sweep
+# ---------------------------------------------------------------------------
+
 import argparse
 import json
 import os
@@ -520,6 +551,25 @@ def print_summary(ml_results: dict, bt_results: dict, elapsed: float):
 # ─── Main ─────────────────────────────────────────────────────────────────────────
 
 def main():
+
+    # -- deprecation guard -------------------------------------------------
+    if "--reproduce-legacy" not in sys.argv:
+        print(
+            "\n" + "=" * 72 + "\n"
+            "  scripts/run_full_pipeline.py is DEPRECATED.\n"
+            + "=" * 72 + "\n\n"
+            "  This is the script that produced the 206-trade / $1,994 result.\n"
+            "  It still labels samples with `max_rebound_multiplier` -- the\n"
+            "  running maximum of the remaining price path -- which no order\n"
+            "  can capture and which ignores the stop-loss. Its `--synthetic`\n"
+            "  mode plants the exact pattern the strategy looks for.\n\n"
+            "  Use instead:\n"
+            "      python scripts/build_dataset.py\n"
+            "      python scripts/run_research.py --sweep\n\n"
+            "  To reproduce the original output for the audit, pass\n"
+            "  --reproduce-legacy. Do not quote its numbers.\n"
+        )
+        return 2
     parser = argparse.ArgumentParser(description="Full ML + Backtest Pipeline")
     parser.add_argument("--data-dir", default="kalshi_data", help="Kalshi data directory")
     parser.add_argument("--models-dir", default="src/ml/models", help="Where to save models")

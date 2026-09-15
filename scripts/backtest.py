@@ -26,6 +26,7 @@ from src.data.csv_loader import load_games_from_csv
 from src.ml.dataset import SyntheticDataGenerator
 from src.strategy.regime_router import RegimeRouter
 from src.backtest.backtest_engine import BacktestEngine
+from src.backtest.costs import FillModel, KalshiFeeModel
 from src.backtest.backtest_report import generate_report
 
 
@@ -38,8 +39,10 @@ def main():
     parser.add_argument("--max-samples", type=int, default=500)
     parser.add_argument("--bankroll", type=float, default=100.0,
                         help="Initial bankroll in USD")
-    parser.add_argument("--tx-cost", type=float, default=0.01,
-                        help="Transaction cost as fraction (default 1%%)")
+    parser.add_argument("--slippage-ticks", type=float, default=0.0,
+                        help="Extra cents paid beyond the touch on each leg")
+    parser.add_argument("--tx-cost", type=float, default=None,
+                        help=argparse.SUPPRESS)
     parser.add_argument("--monte-carlo", action="store_true",
                         help="Run Monte Carlo simulation")
     parser.add_argument("--mc-sims", type=int, default=1000,
@@ -80,13 +83,25 @@ def main():
     # Run backtest
     print(f"\nBacktesting on {len(games)} games...")
     print(f"  Bankroll: ${args.bankroll:.2f}")
-    print(f"  Transaction cost: {args.tx_cost:.1%}")
+    if args.tx_cost is not None:
+        print(
+            "\n  --tx-cost is no longer supported. It charged a percentage of\n"
+            "  realised P&L once per round trip; Kalshi charges\n"
+            "  ceil(0.07 * contracts * price * (1 - price)) on notional, on both\n"
+            "  legs. The real schedule is always applied now. Use\n"
+            "  --slippage-ticks to model worse execution.\n"
+        )
+        return 2
+    print(f"  Fees: Kalshi schedule (taker, both legs)")
+    print(f"  Slippage: {args.slippage_ticks:.1f} tick(s) beyond the touch")
     print("-" * 70)
 
+    fees = KalshiFeeModel()
     engine = BacktestEngine(
         config=config,
         initial_bankroll=args.bankroll,
-        transaction_cost_pct=args.tx_cost,
+        fee_model=fees,
+        fill_model=FillModel(slippage_ticks=args.slippage_ticks, fees=fees),
     )
 
     metrics = engine.run(games, router)
