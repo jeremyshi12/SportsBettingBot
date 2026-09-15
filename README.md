@@ -194,10 +194,12 @@ The gate is not decoration. On the surviving panel:
   high or the low came first — which is precisely the question a
   collapse-and-rebound strategy asks.
 - The median market contributes **1 bar inside the live event window**.
-- Only **22 of 821 markets are game-winner markets**, the only family for which
-  "win probability collapses and rebounds" is even a coherent statement. After
-  quality gates, **14** survive, with a median of **2** in-event bars each. The
-  rest are player props, spreads, totals, and *"what will the announcers say"*.
+- Only **46 of 821 markets are winner markets** — the only family for which
+  "win probability collapses and rebounds" is even a coherent statement — and
+  just **22** of those are full-game winners (the rest resolve at half time).
+  After quality gates, **14** survive, with a median of **2** in-event bars
+  each. Everything else is player props, spreads, totals, and *"what will the
+  announcers say during the game"*.
 - The trade tape is **right-truncated**: the scraper never paginated past 200
   trades per market, so for the liquid NBA game markets it captured only the
   final ~1 hour. 109 markets are truncated at that cap.

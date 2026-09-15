@@ -1,42 +1,47 @@
-import pandas as pd
-import os
-from datetime import datetime
+"""DEPRECATED -- superseded by scripts/build_dataset.py.
+
+This script produced data/converted_kalshi.csv, the file the original
+pipeline trained on. It corrupted the panel in four ways, none of which were
+scraping failures:
+
+  prob_a = df["price_close"].fillna(0.5)
+      `price_close` is the last *traded* price and is null on 74.9% of
+      candles (no trade printed that hour), so three quarters of the panel
+      became the constant 0.50. The raw candles carry yes_bid_close and
+      yes_ask_close on 100% of rows, with a genuine two-sided quote on 81%.
+
+  sport = df.get("league", df.get("_league", ...))
+      `league` exists in BOTH frames being merged, so pandas renames them
+      league_x / league_y. df.get("league") therefore returns None, the
+      fallback chain runs out, and every row is labelled "UNKNOWN".
+
+  team_a = yes_sub_title ; team_b = no_sub_title
+      On Kalshi these describe the SAME side for non-winner markets
+      ("Brooklyn wins the 1H by over 12.5 points"), which is why they
+      compared equal on 100% of rows. A binary has a YES side and a NO side,
+      not two teams.
+
+  time_remaining = expiration_time - end_period_ts
+      `expiration_time` is the exchange settlement date, up to 106 days out,
+      not the game end. `close_time` is the trading deadline. This is why the
+      column ran to 2,558 hours and also went negative.
+
+Use instead:
+    python scripts/build_dataset.py
+
+which keeps the bid/ask, the settlement outcomes and the market taxonomy, and
+prints a quality report of everything it drops and why.
+
+Kept for reference. Refuses to run.
+"""
+
+import sys
+
 
 def main():
-    if not os.path.exists("kalshi_data") or not os.path.exists("kalshi_data/candlesticks.csv") or not os.path.exists("kalshi_data/markets.csv"):
-        print("Required kalshi_data files missing.")
-        return
+    sys.stderr.write(__doc__ + "\n")
+    return 2
 
-    print("Loading Kalshi data...")
-    markets = pd.read_csv("kalshi_data/markets.csv")
-    candles = pd.read_csv("kalshi_data/candlesticks.csv")
-
-    # We need: game_id, timestamp, team_a, team_b, prob_a, prob_b, time_remaining, sport
-
-    cols = [c for c in ["ticker", "league", "_league", "yes_sub_title", "no_sub_title", "expiration_time"] if c in markets.columns]
-    markets = markets[cols]
-    
-    print("Merging data...")
-    df = pd.merge(candles, markets, on="ticker", how="inner")
-    
-    print("Formatting...")
-    # Convert expiration_time (ISO string) to timestamp
-    df["exp_ts"] = pd.to_datetime(df["expiration_time"]).apply(lambda x: x.timestamp())
-    
-    out = pd.DataFrame()
-    out["game_id"] = df["ticker"]
-    out["timestamp"] = df["end_period_ts"]
-    out["team_a"] = df.get("yes_sub_title", pd.Series("Team A", index=df.index)).fillna("Team A")
-    out["team_b"] = df.get("no_sub_title", pd.Series("Team B", index=df.index)).fillna("Team B")
-    out["prob_a"] = df["price_close"].fillna(0.5)
-    out["prob_b"] = 1.0 - out["prob_a"]
-    out["time_remaining"] = df["exp_ts"] - df["end_period_ts"]
-    out["sport"] = df.get("league", df.get("_league", pd.Series("UNKNOWN", index=df.index))).fillna("UNKNOWN")
-    
-    os.makedirs("data", exist_ok=True)
-    out_path = "data/converted_kalshi.csv"
-    out.to_csv(out_path, index=False)
-    print(f"Saved {len(out)} rows to {out_path}")
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

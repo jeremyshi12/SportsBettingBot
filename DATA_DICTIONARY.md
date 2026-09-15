@@ -59,12 +59,22 @@ probability**, which only game-winner markets have.
 
 | Kind | Markets | Example | Usable for this strategy? |
 |---|---|---|---|
-| `game_winner` | 22 | `KXNBAGAME` — "Milwaukee at LA Clippers winner?" | **Yes** — 14 survive quality gates |
+| `game_winner` | 46 | `KXNBAGAME` — "Milwaukee at LA Clippers winner?" | **Yes** — 14 survive quality gates |
 | `spread` | 93 | `KXNBASPREAD` — "Milwaukee wins by over 2.5?" | No win probability to collapse |
-| `total` | 79 | `KXNBATOTAL` — "Over 238.5 points" | Same |
-| `player_prop` | 411 | `KXNBAPTS` — "Myles Turner: 20+ points" | Same |
+| `total` | 177 | `KXNBATOTAL` — "Over 238.5 points" | Same |
+| `player_prop` | 438 | `KXNBAPTS` — "Myles Turner: 20+ points" | Same |
 | `novelty` | 62 | `KXNBAMENTION` — "What will the announcers say" | Same |
-| `futures` | 5 | `KXWMARMAD` — championship winner | Horizon is months |
+| `futures` | 5 | `KXWMARMAD`, `KXWMARMADROUND` — tournament outcomes | Horizon is weeks |
+
+The `game_winner` count breaks down as 10 `KXNBAGAME` + 10 `KXNCAABBGAME` +
+2 `KXNCAAMLAXGAME` full-game winners, plus 15 `KXNBA2HWINNER` and
+9 `KXNBA1HWINNER` half winners.
+
+`futures` is matched as a **substring** rather than a suffix: tournament
+markets append a round qualifier (`KXWMARMAD` → `KXWMARMADROUND`), and a
+suffix match drops them into `other`, where their legitimate multi-week
+horizon then looks like the `expiration_time` bug rather than the correct
+horizon for that contract.
 
 ---
 
