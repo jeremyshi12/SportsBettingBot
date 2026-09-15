@@ -33,7 +33,11 @@ class TestSyntheticData:
         if len(df) > 0:
             assert "regime" in df.columns
             assert "did_rebound" in df.columns
-            assert "max_rebound_multiplier" in df.columns
+            assert "realised_multiple" in df.columns
+            # The label must be attainable: a triple-barrier exit can never
+            # exceed the target multiple, whereas the old path-maximum label
+            # routinely did.
+            assert df["realised_multiple"].max() <= 2.0 + 1e-9
 
     def test_dataset_split(self):
         """Split should maintain game-level separation."""

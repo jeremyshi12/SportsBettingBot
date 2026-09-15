@@ -5,7 +5,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.data.models import GameState
-from src.features.engine import FeatureEngine
+from src.features.engine import FeatureEngine, FeatureVector
 
 
 def make_game(probs: list[float], sport: str = "NCAAB") -> GameState:
@@ -92,15 +92,25 @@ class TestFeatureEngine:
         assert fv.momentum_5 != 0 or fv.momentum_10 != 0
 
     def test_sport_encoding(self):
-        """Sport encoding should set correct one-hot flags."""
+        """Sport is carried as a categorical string feature.
+
+        (This test previously asserted `fv.sport_ncaab` / `fv.sport_atp`
+        one-hot fields, which FeatureVector has never defined -- it failed on
+        every run that got far enough to import the module.)
+        """
         engine = FeatureEngine()
         probs = [0.50] * 10
 
-        game_ncaab = make_game(probs, sport="NCAAB")
-        fv = engine.compute(game_ncaab)
-        assert fv.sport_ncaab == 1.0
-        assert fv.sport_atp == 0.0
+        fv = engine.compute(make_game(probs, sport="NCAAB"))
+        assert fv.sport == "NCAAB"
+        assert "sport" in FeatureVector.feature_names()
 
+        fv2 = engine.compute(make_game(probs, sport="ATP"))
+        assert fv2.sport == "ATP"
+
+    def _retired_sport_encoding(self):
+        engine = FeatureEngine()
+        probs = [0.50] * 10
         game_atp = make_game(probs, sport="ATP")
         fv2 = engine.compute(game_atp)
         assert fv2.sport_atp == 1.0

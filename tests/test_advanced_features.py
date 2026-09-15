@@ -6,7 +6,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
 from src.data.models import (
-    GameState, Regime, TradeSignal, ExitStrategy,
+    GameState, Regime, Side, TradeSignal, ExitStrategy,
 )
 from src.features.engine import FeatureEngine, FeatureVector
 from src.execution.portfolio import KellyCriterionSizer, PortfolioManager
@@ -26,12 +26,17 @@ def make_game(probs: list[float], sport: str = "NCAAB") -> GameState:
     return game
 
 
-def make_signal(entry_prob=0.05, exit_mult=5.0, confidence=0.7):
+def make_signal(entry_prob=0.05, exit_mult=5.0, confidence=0.7,
+                side=Side.NO, calibrated=None):
+    """Build a signal. `calibrated` is the model probability Kelly is allowed
+    to size on; `confidence` alone is a strategy heuristic and is deliberately
+    not sufficient."""
     return TradeSignal(
-        game_id="TEST-001", regime=Regime.NON_CROSS,
+        game_id="TEST-001", regime=Regime.NON_CROSS, side=side,
         entry_prob=entry_prob, target_exit_prob=entry_prob * exit_mult,
         exit_multiplier=exit_mult, confidence=confidence,
         op_or_s_value=3.0, exit_strategy=ExitStrategy.MULTIPLIER, timestamp=0.0,
+        calibrated_confidence=confidence if calibrated is None else calibrated,
     )
 
 
@@ -118,6 +123,47 @@ class TestKellyCriterion:
         stake = sizer.compute_stake(signal, bankroll=100.0, max_stake=10.0)
         assert stake > 0
 
+    def test_negative_edge_returns_zero_stake(self):
+        """REGRESSION: a negative-edge signal must not be traded at all.
+
+        The original returned `min_bet_usd * 0.5` when full Kelly was
+        negative, i.e. it still placed a bet on a signal it had just
+        determined had no edge.
+        """
+        sizer = KellyCriterionSizer()
+        # p=5% on a 6x payoff with a 50% stop is a clearly negative edge.
+        signal = make_signal(exit_mult=6.0, confidence=0.05)
+        assert sizer.compute_stake(signal, bankroll=100.0, max_stake=10.0) == 0.0
+
+    def test_uncalibrated_confidence_is_not_sized_on(self):
+        """REGRESSION: Kelly must refuse a non-probability.
+
+        Strategies set `confidence = min(op_value / 10, 1.0)`, a price ratio
+        that saturates at 1.0 while the true win rate is ~15%. Feeding that to
+        Kelly sizes maximally on the weakest signals. The sizer now requires
+        an explicitly calibrated probability and falls back to flat sizing.
+        """
+        sizer = KellyCriterionSizer(require_calibrated_p=True, min_bet_usd=0.50)
+        bare = TradeSignal(
+            game_id="T", regime=Regime.NON_CROSS, side=Side.NO,
+            entry_prob=0.03, target_exit_prob=0.18, exit_multiplier=6.0,
+            confidence=1.0,           # saturated OP heuristic
+            op_or_s_value=50.0,
+        )
+        stake = sizer.compute_stake(bare, bankroll=10_000.0, max_stake=500.0)
+        assert stake == 0.50, "must fall back to the flat minimum, not max Kelly"
+
+    def test_partial_loss_kelly_exceeds_total_loss_kelly(self):
+        """The general Kelly form must be used for a partial-loss payoff.
+
+        With a stop at 0.5x, a loss costs half the stake, so the optimal
+        fraction is strictly larger than the all-or-nothing formula gives.
+        """
+        p, b, a = 0.35, 5.0, 0.5
+        total_loss_kelly = (p * (b + 1.0) - 1.0) / b
+        partial_loss_kelly = (p * b - (1.0 - p) * a) / (a * b)
+        assert partial_loss_kelly > total_loss_kelly
+
     def test_stake_capped_at_max(self):
         """Stake should never exceed max_stake."""
         sizer = KellyCriterionSizer(kelly_fraction=1.0, max_bet_fraction=1.0)
@@ -129,7 +175,7 @@ class TestKellyCriterion:
         """Low confidence should result in smaller stakes."""
         sizer = KellyCriterionSizer()
         signal_high = make_signal(confidence=0.9)
-        signal_low = make_signal(confidence=0.3)
+        signal_low = make_signal(confidence=0.35)
         stake_high = sizer.compute_stake(signal_high, 100.0, 10.0)
         stake_low = sizer.compute_stake(signal_low, 100.0, 10.0)
         assert stake_high >= stake_low
